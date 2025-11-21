@@ -3,10 +3,16 @@ import './globals.css';
 import { Providers } from '@/components/providers';
 import { Toaster } from '@/components/ui/toaster';
 
-export const metadata: Metadata = {
+export const metadata = {
   title: 'CodeContest Arena',
-  description: 'The ultimate platform for competitive programming.',
+  icons: {
+    icon: [
+      { url: './favicon.ico', sizes: '32x32' },
+      { url: './favicon.ico', sizes: '16x16' },
+    ],
+  },
 };
+
 
 export default function RootLayout({
   children,
