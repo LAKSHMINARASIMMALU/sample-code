@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useEffect, useState, useCallback, useRef } from "react";
+import { useParams, useRouter, useSearchParams } from "next/navigation";
 import {
   doc,
   getDoc,
@@ -30,6 +30,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+
+/*
+ Screenshot for reference (uploaded):
+ /mnt/data/Screenshot 2025-11-21 132412.png
+*/
 
 /* ---------------------------
    Fallback defaults for compiled langs
@@ -131,8 +136,7 @@ function solve(${params.join(", ")}) {
       .join(", ");
     return `${imports}def solve(${paramHints}):
     \"\"\"Write your solution here.\"\"\"
-    # write your logic here
-    return None`;
+    # write your logic here `;
   }
 
   // compiled languages fallback
@@ -303,7 +307,7 @@ function buildWrapperForLanguage(
       .map((name, i) => `const ${name} = ${toJSLiteral(args[i])};`)
       .join("\n");
     const callArgs = paramNames.join(", ");
-    const wrapped = `\n${userCode}\n${declarations}\nconsole.log(solve(${callArgs}));\n`;
+    const wrapped = `\n${userCode}\n${declarations}\n(solve(${callArgs});\n`;
     return { code: wrapped, stdin: "" };
   }
 
@@ -321,7 +325,7 @@ function buildWrapperForLanguage(
       })
       .join("\n");
     const callArgs = paramNames.join(", ");
-    const wrapped = `\n${imports}${userCode}\n${declarations}\nprint(solve(${callArgs}))\n`;
+    const wrapped = `\n${imports}${userCode}\n${declarations}\nsolve(${callArgs})\n`;
     return { code: wrapped, stdin: "" };
   }
 
@@ -342,9 +346,32 @@ type TestResult = {
   error?: string | null;
 };
 
+// small helpers for solved persistence
+function solvedStorageKey(contestId: string, userId?: string) {
+  return `contest_solved:${contestId}:${userId ?? "anon"}`;
+}
+function loadSolvedFromLocal(contestId: string, userId?: string) {
+  try {
+    const raw = localStorage.getItem(solvedStorageKey(contestId, userId));
+    if (!raw) return [] as string[];
+    return JSON.parse(raw) as string[];
+  } catch {
+    return [] as string[];
+  }
+}
+function saveSolvedToLocal(contestId: string, userId: string | undefined, solvedArr: string[]) {
+  try {
+    localStorage.setItem(solvedStorageKey(contestId, userId), JSON.stringify(solvedArr));
+  } catch {}
+}
+
 export default function LiveContestPage() {
   const params = useParams();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const levelParam = searchParams?.get("level");
+  // if levelParam === 'other' handle separately, otherwise try parse to number
+  const selectedLevel = levelParam === "other" ? "other" : levelParam ? Number(levelParam) : null;
   const { user } = useAuth();
   const { toast } = useToast();
   const contestId = params.contestId as string;
@@ -361,6 +388,16 @@ export default function LiveContestPage() {
   const [activeTab, setActiveTab] = useState("output");
   const [isContestOver, setIsContestOver] = useState(false);
   const [testResults, setTestResults] = useState<TestResult[] | null>(null);
+
+  // --- group questions by level (display three divisions) ---
+  // We'll arrange questions into Level 1, Level 2, Level 3 buckets. Questions with other levels go into "Other".
+  const levelOrder = [1, 2, 3];
+  const groupedQuestions = levelOrder.map((lvl) => ({
+    level: lvl,
+    items: questions.filter((q) => Number(q?.level) === lvl),
+  }));
+  const otherQuestions = questions.filter((q) => !levelOrder.includes(Number(q?.level)));
+
 
   const lockContest = useCallback(async () => {
     if (!user || isContestOver) return;
@@ -415,8 +452,23 @@ export default function LiveContestPage() {
           query(collection(db, `contests/${contestId}/questions`), orderBy("level"))
         );
         const list = qSnap.docs.map((d) => ({ id: d.id, ...(d.data() as any) })) as Question[];
-        setQuestions(list);
-        if (list.length) setActiveQuestion(list[0]);
+
+        // If a level is specified in the URL (e.g. ?level=1 or ?level=other), filter questions
+        let filtered: Question[] = list;
+        if (selectedLevel !== null) {
+          if (selectedLevel === "other") {
+            filtered = list.filter((q) => ![1, 2, 3].includes(Number(q?.level)));
+          } else {
+            filtered = list.filter((q) => Number(q?.level) === Number(selectedLevel));
+          }
+        }
+
+        setQuestions(filtered);
+        if (filtered.length) setActiveQuestion(filtered[0]);
+
+        // restore solved from local
+        const localSolved = loadSolvedFromLocal(contestId, user?.uid);
+        if (localSolved && localSolved.length) setSolved(localSolved);
       } catch (err) {
         console.error(err);
         toast({ variant: "destructive", title: "Error", description: "Failed to load contest." });
@@ -521,6 +573,8 @@ export default function LiveContestPage() {
         toast({ title: "✅ Correct!", description: "All test cases passed!" });
         const newSolved = [...new Set([...solved, activeQuestion.id])];
         setSolved(newSolved);
+        // persist solved locally
+        saveSolvedToLocal(contestId, user?.uid, newSolved);
         if (questions.length > 0 && newSolved.length === questions.length) {
           toast({ title: "Contest Completed!", description: "All questions submitted." });
           await lockContest();
@@ -531,7 +585,7 @@ export default function LiveContestPage() {
       }
 
       const firstActual = results[0]?.actual ?? results[0]?.error ?? "No output";
-      setOutput(`First test output:\n${firstActual}`);
+      setOutput(`\n${firstActual}`);
     } catch (err: any) {
       setOutput("Error: " + err.message);
       toast({ variant: "destructive", title: "Execution Error", description: err.message });
@@ -551,7 +605,7 @@ export default function LiveContestPage() {
     <div className="h-screen w-screen flex flex-col">
       <header className="flex h-16 items-center justify-between border-b px-4">
         <h1 className="text-xl font-bold">{contest?.name}</h1>
-        {contest && <ContestTimer duration={contest.duration} onTimeUp={handleTimeUp} />}
+        {contest && <ContestTimer duration={contest.duration} contestId={contestId} userId={user?.uid} onTimeUp={handleTimeUp} />}
       </header>
 
       <PanelGroup direction="horizontal" className="flex-grow">
@@ -559,27 +613,73 @@ export default function LiveContestPage() {
         <Panel defaultSize={25} minSize={20}>
           <div className="flex flex-col h-full">
             <h2 className="p-4 text-lg font-semibold border-b">Questions</h2>
-            <ScrollArea className="flex-grow">
-              {questions.map((q) => (
-                <Button
-                  key={q.id}
-                  variant={activeQuestion?.id === q.id ? "secondary" : "ghost"}
-                  className="w-full justify-between rounded-none p-4 h-auto"
-                  onClick={() => {
-                    if (!isContestOver) {
-                      setActiveQuestion(q);
-                      const gen = generateDefaultCode(language, (q as any).inputs || []);
-                      setCode(gen);
-                      setOutput("");
-                      setTestResults(null);
-                    }
-                  }}
-                  disabled={isSubmitting || isContestOver}
-                >
-                  <span>{q.title}</span>
-                  {solved.includes(q.id) && <CheckCircle className="h-5 w-5 text-green-500" />}
-                </Button>
+            <ScrollArea className="flex-grow p-2">
+              {/* Render three level buckets */}
+              {groupedQuestions.map((group) => (
+                <div key={group.level} className="mb-4">
+                  <div className="px-2 py-1 bg-muted/50 rounded-t font-medium">Level {group.level}</div>
+                  <div className="space-y-1">
+                    {group.items.length === 0 ? (
+                      <div className="px-3 py-2 text-sm text-muted-foreground">No questions for level {group.level}.</div>
+                    ) : (
+                      group.items.map((q) => (
+                        <Button
+                          key={q.id}
+                          variant={activeQuestion?.id === q.id ? "secondary" : "ghost"}
+                          className="w-full justify-between rounded-none p-3 h-auto text-left"
+                          onClick={() => {
+                            if (!isContestOver) {
+                              setActiveQuestion(q);
+                              const gen = generateDefaultCode(language, (q as any).inputs || []);
+                              setCode(gen);
+                              setOutput("");
+                              setTestResults(null);
+                            }
+                          }}
+                          disabled={isSubmitting || isContestOver}
+                        >
+                          <span className="truncate">{q.title}</span>
+                          {solved.includes(q.id) && <CheckCircle className="h-5 w-5 text-green-500" />}
+                        </Button>
+                      ))
+                    )}
+                  </div>
+                </div>
               ))}
+
+              {/* Other questions (levels outside 1-3) */}
+              {otherQuestions.length > 0 && (
+                <div className="mb-4">
+                  <div className="px-2 py-1 bg-muted/50 rounded-t font-medium">Other Levels</div>
+                  <div className="space-y-1">
+                    {otherQuestions.map((q) => (
+                      <Button
+                        key={q.id}
+                        variant={activeQuestion?.id === q.id ? "secondary" : "ghost"}
+                        className="w-full justify-between rounded-none p-3 h-auto text-left"
+                        onClick={() => {
+                          if (!isContestOver) {
+                            setActiveQuestion(q);
+                            const gen = generateDefaultCode(language, (q as any).inputs || []);
+                            setCode(gen);
+                            setOutput("");
+                            setTestResults(null);
+                          }
+                        }}
+                        disabled={isSubmitting || isContestOver}
+                      >
+                        <span className="truncate">{q.title} <span className="text-xs text-muted-foreground">(level: {q.level})</span></span>
+                        {solved.includes(q.id) && <CheckCircle className="h-5 w-5 text-green-500" />}
+                      </Button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* If no questions at all */}
+              {questions.length === 0 && (
+                <div className="px-3 py-2 text-sm text-muted-foreground">No questions available for this contest.</div>
+              )}
             </ScrollArea>
           </div>
         </Panel>
@@ -776,46 +876,119 @@ export default function LiveContestPage() {
 }
 
 /* ---------------------------
-   Timer component (placed at bottom so it doesn't interrupt main flow)
-   It's identical to earlier but moved here for completeness.
+   Timer component (interactive + persists endTimestamp locally)
    --------------------------- */
 function ContestTimer({
   duration,
+  contestId,
+  userId,
   onTimeUp,
 }: {
   duration: number;
+  contestId?: string;
+  userId?: string | null;
   onTimeUp: () => void;
 }) {
-  const [timeLeft, setTimeLeft] = useState(duration * 60);
+  const timerKey = `contest_end:${contestId}:${userId ?? "anon"}`;
+
+  const readPersistedEnd = (): number => {
+    try {
+      const raw = localStorage.getItem(timerKey);
+      if (raw) {
+        const v = Number(JSON.parse(raw));
+        if (!Number.isNaN(v) && v > Date.now()) return v;
+      }
+    } catch {}
+    return Date.now() + duration * 60 * 1000;
+  };
+
+  const [endTs, setEndTs] = useState<number>(() => readPersistedEnd());
+  const [timeLeft, setTimeLeft] = useState<number>(() => Math.max(0, Math.round((readPersistedEnd() - Date.now()) / 1000)));
+  const [openControls, setOpenControls] = useState(false);
+  const [syncing, setSyncing] = useState(false);
 
   useEffect(() => {
-    if (timeLeft <= 0) {
-      onTimeUp();
-      return;
-    }
-    const timer = setInterval(() => setTimeLeft((prev) => prev - 1), 1000);
-    return () => clearInterval(timer);
-  }, [timeLeft, onTimeUp]);
+    try {
+      localStorage.setItem(timerKey, JSON.stringify(endTs));
+    } catch {}
+    setTimeLeft(Math.max(0, Math.round((endTs - Date.now()) / 1000)));
+  }, [endTs, timerKey]);
+
+  useEffect(() => {
+    const tick = () => {
+      const left = Math.max(0, Math.round((endTs - Date.now()) / 1000));
+      setTimeLeft(left);
+      if (left <= 0) onTimeUp();
+    };
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [endTs, onTimeUp]);
 
   const formatTime = (seconds: number) => {
-    const h = Math.floor(seconds / 3600)
-      .toString()
-      .padStart(2, "0");
-    const m = Math.floor((seconds % 3600) / 60)
-      .toString()
-      .padStart(2, "0");
+    const h = Math.floor(seconds / 3600).toString().padStart(2, "0");
+    const m = Math.floor((seconds % 3600) / 60).toString().padStart(2, "0");
     const s = (seconds % 60).toString().padStart(2, "0");
     return `${h}:${m}:${s}`;
   };
 
+  const addMinutesLocal = (mins: number) => {
+    setEndTs((prev) => {
+      const next = prev + mins * 60 * 1000;
+      try { localStorage.setItem(timerKey, JSON.stringify(next)); } catch {}
+      return next;
+    });
+  };
+
+  const trySyncFromServer = async () => {
+    setSyncing(true);
+    try {
+      const res = await fetch(`/api/contest-end?contestId=${encodeURIComponent(contestId ?? "")}`);
+      if (!res.ok) throw new Error("Server sync failed");
+      const data = await res.json();
+      if (data?.endTimestamp && Number(data.endTimestamp) > Date.now()) {
+        setEndTs(Number(data.endTimestamp));
+      } else {
+        throw new Error("Invalid server endTimestamp");
+      }
+    } catch (err: any) {
+      alert("Sync failed: " + (err?.message ?? "unknown"));
+    } finally {
+      setSyncing(false);
+    }
+  };
+
   return (
-    <div
-      className={`flex items-center gap-2 font-mono text-lg font-semibold p-2 rounded-md ${
-        timeLeft < 300 ? "text-destructive animate-pulse" : ""
-      }`}
-    >
-      <Clock className="h-5 w-5" />
-      <span>{formatTime(timeLeft)}</span>
+    <div className="relative">
+      <button
+        onClick={() => setOpenControls((s) => !s)}
+        className={`flex items-center gap-2 font-mono text-lg font-semibold p-2 rounded-md ${
+          timeLeft < 300 ? "text-destructive animate-pulse" : ""
+        }`}
+        title="Click to open timer controls"
+      >
+        <Clock className="h-5 w-5" />
+        <span>{formatTime(timeLeft)}</span>
+      </button>
+
+      {openControls && (
+        <div className="absolute right-0 mt-2 w-44 bg-card border rounded p-3 shadow">
+          <div className="text-sm mb-2">Timer controls</div>
+          <div className="flex gap-2">
+            <button className="px-2 py-1 rounded bg-muted hover:bg-muted-foreground/20 text-sm" onClick={() => addMinutesLocal(5)}>
+              +5 min
+            </button>
+            <button
+              className="px-2 py-1 rounded bg-muted hover:bg-muted-foreground/20 text-sm"
+              onClick={trySyncFromServer}
+              disabled={syncing}
+            >
+              {syncing ? "Syncing..." : "Sync"}
+            </button>
+          </div>
+          <div className="text-xs text-muted-foreground mt-2">Local changes only until server is updated.</div>
+        </div>
+      )}
     </div>
   );
 }
